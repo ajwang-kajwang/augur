@@ -1,0 +1,15 @@
+[package]
+name = "okx_rust_bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "blocking"] } # HTTP Client
+serde = { version = "1.0", features = ["derive"] } # Serialization
+serde_json = "1.0" # JSON parsing
+dotenv = "0.15" # Environment variables
+hmac = "0.12" # Crypto for signing
+sha2 = "0.10" # Crypto for signing
+hex = "0.4" # Hex encoding
+chrono = { version = "0.4", features = ["serde"] } # Time handling
+base64 = "0.13"
