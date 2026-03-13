@@ -20,7 +20,7 @@ impl Config {
             api_key,
             secret_key,
             passphrase,
-            is_paper_trading: true, // Hardcoded for safety
+            is_paper_trading: true, 
         })
     }
 }
