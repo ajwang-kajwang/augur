@@ -20,7 +20,6 @@ impl OkxInterface {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         
-        // Critical for Demo Trading
         if config.is_paper_trading {
             headers.insert("x-simulated-trading", HeaderValue::from_static("1"));
         }
@@ -32,7 +31,6 @@ impl OkxInterface {
         }
     }
 
-    // --- Signing Engine ---
     fn sign_request(&self, method: &str, path: &str, body: &str) -> Result<HeaderMap, Box<dyn Error>> {
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let message = format!("{}{}{}{}", timestamp, method, path, body);
@@ -50,8 +48,6 @@ impl OkxInterface {
         Ok(headers)
     }
 
-    // --- Public API Methods ---
-
     pub fn get_ticker(&self, inst_id: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let path = format!("/api/v5/market/ticker?instId={}", inst_id);
         let url = format!("{}{}", self.base_url, path);
@@ -64,7 +60,6 @@ impl OkxInterface {
         let path = "/api/v5/trade/order";
         let url = format!("{}{}", self.base_url, path);
 
-        // Payload
         let payload = serde_json::json!({
             "instId": inst_id,
             "tdMode": "cross",
@@ -74,10 +69,8 @@ impl OkxInterface {
         });
         let body_str = payload.to_string();
 
-        // Sign request
         let headers = self.sign_request("POST", path, &body_str)?;
 
-        // Execute
         let resp = self.client.post(&url)
             .headers(headers)
             .body(body_str)
