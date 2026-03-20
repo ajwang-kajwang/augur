@@ -13,3 +13,10 @@ sha2 = "0.10" # Crypto for signing
 hex = "0.4" # Hex encoding
 chrono = { version = "0.4", features = ["serde"] } # Time handling
 base64 = "0.13"
+tokio = { version = "1.50.0", features = ["full"] }
+futures-util = "0.3.32"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23.37", features = ["ring"] }

@@ -36,12 +36,15 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     info!("=== AUGUR v0.2 — WebSocket Architecture ===");
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 
-    // --- 1. Config (unchanged from your v0.1) ---
+    // --- Config ---
     let config = Config::load().expect("Failed to load config");
     info!("[1/3] Config loaded. Paper trading: {}", config.is_paper_trading);
 
-    // --- 2. Connect WebSocket ---
+    // --- Connect WebSocket ---
     // Define which instruments to stream. Add more here to multiplex.
     let instruments = vec![
         "BTC-USDT-SWAP".to_string(),

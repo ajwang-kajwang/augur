@@ -10,7 +10,7 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self, String> {
-        dotenv().ok(); // Load .env file
+        dotenv().ok(); 
         
         let api_key = env::var("OKX_API_KEY").map_err(|_| "Missing OKX_API_KEY")?;
         let secret_key = env::var("OKX_SECRET_KEY").map_err(|_| "Missing OKX_SECRET_KEY")?;

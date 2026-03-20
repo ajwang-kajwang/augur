@@ -96,7 +96,7 @@ impl WsClient {
         info!("Connecting to {}", url);
 
         // --- Step 1: TCP + TLS + WebSocket handshake (one await, all handled) ---
-        let (ws_stream, _response) = connect_async(url).await?;
+        let (ws_stream, _response) = connect_async(url.as_str()).await?;
         info!("WebSocket connected");
 
         // Split the WebSocket into a write half (Sink) and read half (Stream).
@@ -108,7 +108,7 @@ impl WsClient {
         // --- Step 2: Subscribe to channels ---
         let subscribe_msg = self.build_subscribe_message();
         info!("Subscribing: {}", subscribe_msg);
-        write.send(Message::Text(subscribe_msg)).await?;
+        write.send(Message::Text(subscribe_msg.into())).await?;
 
         // --- Step 3: Create the channel that connects WS loop → strategy loop ---
         let (tx, rx) = mpsc::channel::<StreamEvent>(self.config.channel_buffer);
@@ -165,7 +165,7 @@ impl WsClient {
 
                     // Branch 2: Time to send a keepalive ping
                     _ = ping_interval.tick() => {
-                        if write.send(Message::Text("ping".to_string())).await.is_err() {
+                        if write.send(Message::Text("ping".into())).await.is_err() {
                             error!("Failed to send ping — connection likely dead");
                             break;
                         }
