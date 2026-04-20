@@ -269,7 +269,7 @@ async fn main() {
 
 /// Submit a signal to the order manager if the trading gate is open.
 /// When closed, this is a no-op aside from a logged notification.
-fn submit_if_enabled(
+async fn submit_if_enabled(
     interface: &OkxInterface,
     symbol: &str,
     signal: &risk::TradeSignal,
@@ -289,7 +289,7 @@ fn submit_if_enabled(
         signal.timeframe, signal.entry_zone, now_ms,
     );
 
-    match OrderManager::submit_signal(interface, symbol, signal, &client_ord_id) {
+    match OrderManager::submit_signal(interface, symbol, signal, &client_ord_id).await {
         Ok(submission) => {
             *submitted_counter += 1;
             info!(
