@@ -1,34 +1,32 @@
 // src/main.rs
 //
 // ============================================================================
-// AUGUR v0.3 — CANDLE AGGREGATION
+// AUGUR v0.6 — RISK GATE + ORDER EXECUTION
 // ============================================================================
 //
-// What changed from v0.2:
+// What changed from v0.5:
 //
-//   v0.2: Event loop printed raw trades and book updates. The "Phase 2 hooks"
-//         were pseudocode comments showing where strategy logic would go.
+//   v0.5: Event loop logged detected ABCD patterns and their Fibonacci
+//         anchors. No trade signals were generated.
 //
-//   v0.3: The hooks are now real code. Every trade tick flows into the
-//         Instrument, which fans it out to four timeframe aggregators
-//         simultaneously. When a candle closes, the event loop logs it
-//         and (soon) will route it to strategy modules.
+//   v0.6: Detected patterns flow through the RISK ENGINE, which performs
+//         invalidation-based stop placement, R:R gating against Target 3,
+//         and position sizing from account equity. Passing signals are
+//         submitted to the ORDER MANAGER, which builds an OKX limit order
+//         with an attached OCO exit pair (stop + take-profit).
 //
-// The event loop is still the SINGLE CONSUMER of the WebSocket stream.
-// All processing happens synchronously within the loop body. This keeps
-// the architecture simple — no shared state, no locks, no data races.
+// ============================================================================
+// SAFETY: TRADING GATE
+// ============================================================================
 //
-// WHAT HAPPENS ON EACH TRADE:
-// ===========================
-//   1. Trade arrives from WS via mpsc channel
-//   2. instrument.update_from_trade() is called
-//   3. Inside, the trade is fed to all 4 CandleAggregators (M1, M15, H1, H4)
-//   4. If any aggregator crosses a period boundary, it returns the closed candle
-//   5. The event loop logs the close and (Phase 2B+) routes to strategy modules
+// The `trading_enabled` flag in Config defaults to false. When disabled,
+// signals are built and logged but NOT submitted to the exchange. This
+// lets us observe the signal stream on paper-trading keys before
+// committing to automated execution.
 //
-// Most ticks produce no candle closes (empty Vec). At minute boundaries,
-// the M1 aggregator fires. At 15-minute marks, M1 + M15 fire together.
-// At the top of the hour, M1 + M15 + H1 all fire. Every 4 hours, all four.
+// To enable: set `AUGUR_TRADING_ENABLED=1` in the `.env` file.
+// The OKX `x-simulated-trading: 1` header remains active regardless,
+// so enabling trading routes orders to the OKX testnet — not live funds.
 
 mod config;
 mod okx_interface;
@@ -37,33 +35,63 @@ mod order_manager;
 mod ws_client;
 mod ws_types;
 mod candle;
+mod swing;
+mod abc_brc;
+mod fibonacci;
+mod risk;
 
 use config::Config;
 use instrument::Instrument;
 use candle::Timeframe;
 use ws_client::{WsClient, WsConfig};
 use ws_types::StreamEvent;
+use fibonacci::FibSequence;
+use risk::{RiskEngine, RiskParams};
+use order_manager::OrderManager;
+use okx_interface::OkxInterface;
 use tracing::{info, warn, error};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    info!("=== AUGUR v0.3 — Candle Aggregation Engine ===");
+    info!("=== AUGUR v0.6 — Risk Gate + Order Execution ===");
 
-    // --- 1. Config ---
     let config = Config::load().expect("Failed to load config");
-    info!("[1/4] Config loaded. Paper trading: {}", config.is_paper_trading);
+    info!(
+        "[1/5] Config loaded. Paper trading: {} | Trading enabled: {} | Balance: ${:.2}",
+        config.is_paper_trading, config.trading_enabled, config.account_balance,
+    );
 
-    // --- 2. Initialize Instrument ---
-    // The Instrument now holds multi-timeframe candle state.
-    // Default setup: M1 (500), M15 (200), H1 (168), H4 (180).
+    // The REST interface is used by the order manager. Cloned config
+    // because the main loop still needs to read trading_enabled and
+    // account_balance.
+    let trading_enabled = config.trading_enabled;
+    let account_balance = config.account_balance;
+    let interface = OkxInterface::new(Config {
+        api_key: config.api_key.clone(),
+        secret_key: config.secret_key.clone(),
+        passphrase: config.passphrase.clone(),
+        is_paper_trading: config.is_paper_trading,
+        trading_enabled: config.trading_enabled,
+        account_balance: config.account_balance,
+    });
+    info!("[2/5] REST interface ready");
+
     let mut btc = Instrument::new("BTC-USDT-SWAP");
-    info!("[2/4] Instrument initialized with candle aggregators: M1, M15, H1, H4");
+    info!("[3/5] Instrument initialized: candles M1/M15/H1/H4, swings H1/H4 (lookback=3)");
 
-    // --- 3. Connect WebSocket ---
+    // Risk engine — configured from Config defaults. These can be tuned
+    // later via additional .env variables (min_rr, stop_buffer, etc.).
+    let risk_engine = RiskEngine::new(RiskParams::fmg_default(account_balance));
+    info!(
+        "[4/5] Risk engine: risk-per-trade {:.1}% | min R:R 1:{:.1} | stop buffer {:.2}% of range",
+        risk_engine.params().risk_per_trade_pct * 100.0,
+        risk_engine.params().min_rr_ratio,
+        risk_engine.params().stop_buffer_pct * 100.0,
+    );
+
     let instruments = vec!["BTC-USDT-SWAP".to_string()];
-
     let ws_config = if config.is_paper_trading {
         WsConfig::paper_trading(instruments)
     } else {
@@ -72,132 +100,154 @@ async fn main() {
 
     let ws = WsClient::new(ws_config);
     let mut rx = ws.connect().await.expect("WebSocket connection failed");
-    info!("[3/4] WebSocket connected — streaming trades + order book");
+    info!("[5/5] WebSocket connected — entering event loop");
 
-    // --- 4. Event Loop ---
-    info!("[4/4] Entering event loop — building candles from live trades");
-    info!("       Candle closes will be logged as they occur.");
-    info!("       Periodic status every 1000 trades.");
+    if !trading_enabled {
+        warn!("⚠️  Trading gate is CLOSED — signals will be logged but NOT submitted.");
+        warn!("    Set AUGUR_TRADING_ENABLED=1 in .env to enable paper-trading execution.");
+    }
 
     let mut trade_count: u64 = 0;
     let mut book_count: u64 = 0;
+    let mut signals_built: u64 = 0;
+    let mut signals_submitted: u64 = 0;
 
     while let Some(event) = rx.recv().await {
         match event {
             StreamEvent::Trade(trade) => {
                 trade_count += 1;
 
-                // ==========================================================
-                // THE v0.3 CORE: Feed the trade into the Instrument.
-                // This updates last_price AND all candle aggregators.
-                // ==========================================================
-                let closed_candles = btc.update_from_trade(&trade);
+                let outcome = btc.update_from_trade(&trade);
 
-                // --- Log candle closes ---
-                // This is where strategy modules will eventually plug in.
-                // For now, we log every close so you can watch candles form
-                // in real time and verify the aggregation is correct.
-                for (timeframe, candle) in &closed_candles {
-                    // Use different log levels by timeframe importance.
-                    // M1 closes are frequent (every 60s), so they're info.
-                    // Higher timeframes are rarer and more significant.
+                // --- Candle closes ---
+                for (timeframe, candle) in &outcome.closed_candles {
                     match timeframe {
-                        Timeframe::M1 => {
-                            info!(
-                                "🕯 [{}] CANDLE CLOSE | {}",
-                                timeframe, candle
-                            );
+                        Timeframe::M1 | Timeframe::M5 => {
+                            info!("🕯 [{}] {}", timeframe, candle);
                         }
-                        Timeframe::M5 => {
-                            info!(
-                                "🕯🕯 [{}] CANDLE CLOSE | {}",
-                                timeframe, candle
-                            );
-                        }
-                        Timeframe::M15 => {
-                            warn!(
-                                "🕯🕯🕯 [{}] CANDLE CLOSE | {}",
-                                timeframe, candle
-                            );
-                        }
-                        Timeframe::H1 => {
-                            warn!(
-                                "🔔 [{}] CANDLE CLOSE | {}",
-                                timeframe, candle
-                            );
-                        }
-                        Timeframe::H4 | Timeframe::D1 => {
-                            // H4 and D1 closes are significant structural events.
-                            error!(
-                                "🔔🔔 [{}] CANDLE CLOSE | {}",
-                                timeframe, candle
-                            );
-                        }
+                        Timeframe::M15 => warn!("🕯🕯 [{}] {}", timeframe, candle),
+                        Timeframe::H1  => warn!("🔔 [{}] {}", timeframe, candle),
+                        Timeframe::H4 | Timeframe::D1 => error!("🔔🔔 [{}] {}", timeframe, candle),
                     }
-
-                    // ---------------------------------------------------------
-                    // PHASE 2B HOOK: Strategy signal generation goes here.
-                    //
-                    // When the swing detector is built, this becomes:
-                    //
-                    //   if let Some(swing) = swing_detector.update(timeframe, &candle) {
-                    //       if let Some(signal) = abc_brc.evaluate(&btc, &swing) {
-                    //           order_manager.submit_signal(&signal);
-                    //       }
-                    //   }
-                    //
-                    // For the DSP pipeline, M1 closes feed the FFT buffer:
-                    //
-                    //   if *timeframe == Timeframe::M1 {
-                    //       dsp_engine.ingest_candle(&candle);
-                    //   }
-                    // ---------------------------------------------------------
                 }
 
-                // --- Periodic status logging ---
-                // Every 1000 trades, print a summary of candle aggregator state.
-                // This lets you monitor warmup progress without flooding the log.
-                if trade_count % 1000 == 0 {
-                    info!(
-                        "[STATUS] Trades: {} | Price: ${:.2} | Candles: [{}]",
-                        trade_count,
-                        btc.last_price,
-                        btc.candle_status(),
+                // --- Swings + pattern detection + risk gate + order submission ---
+                for (timeframe, swing) in &outcome.new_swings {
+                    // Log the swing itself
+                    match timeframe {
+                        Timeframe::H1 => warn!(
+                            "⛳ [{}] SWING {} @ ${:.2}",
+                            timeframe, swing.swing_type, swing.price,
+                        ),
+                        Timeframe::H4 => error!(
+                            "⛳⛳ [{}] SWING {} @ ${:.2}",
+                            timeframe, swing.swing_type, swing.price,
+                        ),
+                        _ => {}
+                    }
+
+                    // Pattern detection gated on swing detector availability
+                    let detector = match btc.swing_detector(*timeframe) {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    // ABCD is the primary signal generator. BRC and combined
+                    // patterns are logged for context; only ABCD feeds the
+                    // risk engine in v0.6.
+                    let pattern = match abc_brc::detect_abcd(detector) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    let fib = FibSequence::from_pattern(&pattern);
+
+                    warn!("📐 [{}] {}", timeframe, pattern);
+                    warn!(
+                        "    FIB: Golden ${:.2} | Sniper ${:.2} | T3 ${:.2}",
+                        fib.golden_zone(), fib.sniper_zone(), fib.target3(),
                     );
 
-                    // Show current in-progress candles if available
-                    if let Some(m1) = btc.current_candle(Timeframe::M1) {
-                        info!(
-                            "  M1 building: O:{:.2} H:{:.2} L:{:.2} C:{:.2} ({}t)",
-                            m1.open, m1.high, m1.low, m1.close, m1.trade_count
+                    // Also log BRC and combined for confluence visibility
+                    if let Some(brc) = abc_brc::detect_brc_default(detector) {
+                        warn!("🔀 [{}] {}", timeframe, brc);
+                    }
+                    if let Some(combo) = abc_brc::detect_combined(
+                        detector,
+                        abc_brc::DEFAULT_BRC_RETEST_RATIO,
+                    ) {
+                        error!(
+                            "🎯🎯 [{}] HIGH-CONFLUENCE {} | ABCD retrace {:.1}% | BRC accuracy {:.1}%",
+                            timeframe,
+                            combo.direction(),
+                            combo.abcd.c_retracement() * 100.0,
+                            combo.brc.retest_accuracy() * 100.0,
                         );
                     }
 
-                    // Report warmup status for strategy-critical timeframes
-                    let h1_ready = btc.is_warmed_up(Timeframe::H1, 20);
-                    let h4_ready = btc.is_warmed_up(Timeframe::H4, 10);
-                    if !h1_ready || !h4_ready {
-                        info!(
-                            "  Warmup: H1 {}/20 | H4 {}/10",
-                            btc.candle_agg(Timeframe::H1)
-                                .map_or(0, |a| a.history_len()),
-                            btc.candle_agg(Timeframe::H4)
-                                .map_or(0, |a| a.history_len()),
-                        );
-                    } else {
-                        info!("  All strategy timeframes warmed up ✓");
+                    // =====================================================
+                    // RISK GATE
+                    // =====================================================
+                    // Evaluate both entry zones. Golden is the primary;
+                    // Sniper is the add-on. In v0.6 we emit both signals
+                    // whenever they pass — Phase 2E will add position
+                    // tracking so Sniper only fires when a Golden is
+                    // already active (compounding discipline).
+
+                    match risk_engine.evaluate_golden(&pattern, &fib, *timeframe) {
+                        Ok(signal) => {
+                            signals_built += 1;
+                            info!("✅ GOLDEN signal #{}: {}", signals_built, signal);
+                            submit_if_enabled(
+                                &interface,
+                                &btc.symbol,
+                                &signal,
+                                trading_enabled,
+                                &mut signals_submitted,
+                                trade.timestamp_ms,
+                            );
+                        }
+                        Err(reason) => {
+                            info!("⛔ GOLDEN rejected: {}", reason);
+                        }
                     }
+
+                    match risk_engine.evaluate_sniper(&pattern, &fib, *timeframe) {
+                        Ok(signal) => {
+                            signals_built += 1;
+                            info!("✅ SNIPER signal #{}: {}", signals_built, signal);
+                            submit_if_enabled(
+                                &interface,
+                                &btc.symbol,
+                                &signal,
+                                trading_enabled,
+                                &mut signals_submitted,
+                                trade.timestamp_ms,
+                            );
+                        }
+                        Err(reason) => {
+                            info!("⛔ SNIPER rejected: {}", reason);
+                        }
+                    }
+                }
+
+                // --- Periodic status ---
+                if trade_count % 1000 == 0 {
+                    info!(
+                        "[STATUS] Trades: {} | Price: ${:.2} | Signals built/submitted: {}/{} | Candles: [{}] | Swings: [{}]",
+                        trade_count,
+                        btc.last_price,
+                        signals_built, signals_submitted,
+                        btc.candle_status(),
+                        btc.swing_status(),
+                    );
                 }
             }
 
             StreamEvent::Book(book) => {
                 book_count += 1;
-
-                // Update the Instrument's top-of-book state.
                 btc.update_from_book(&book);
 
-                // Log spread periodically — useful for monitoring execution
-                // conditions and detecting unusual market microstructure.
                 if book_count % 500 == 0 {
                     info!(
                         "[BOOK #{:>6}] Spread: {:.1} bps | Bid: ${:.2} | Ask: ${:.2}",
@@ -207,23 +257,48 @@ async fn main() {
                         btc.book.best_ask.as_ref().map_or(0.0, |a| a.price),
                     );
                 }
-
-                // ---------------------------------------------------------
-                // PHASE 2 HOOK: Order book strategy / DSP pipeline.
-                //
-                // The top-of-book is now always available at btc.book.
-                // The FPGA/DSP pipeline will read this directly:
-                //
-                //   dsp_engine.ingest_book(&btc.book);
-                // ---------------------------------------------------------
             }
         }
     }
 
     error!(
-        "Stream ended — connection lost. Trades: {}, Book updates: {}, Candles produced: [{}]",
-        trade_count,
-        book_count,
-        btc.candle_status(),
+        "Stream ended. Trades: {}, Books: {}, Signals built: {}, Submitted: {}",
+        trade_count, book_count, signals_built, signals_submitted,
     );
+}
+
+/// Submit a signal to the order manager if the trading gate is open.
+/// When closed, this is a no-op aside from a logged notification.
+fn submit_if_enabled(
+    interface: &OkxInterface,
+    symbol: &str,
+    signal: &risk::TradeSignal,
+    trading_enabled: bool,
+    submitted_counter: &mut u64,
+    now_ms: u64,
+) {
+    if !trading_enabled {
+        info!("    (trading gate closed — signal not submitted)");
+        return;
+    }
+
+    // Build a unique client order ID so we can correlate logs with
+    // exchange records. Format: augur_<TF>_<ZONE>_<timestamp>.
+    let client_ord_id = format!(
+        "augur_{}_{}_{}",
+        signal.timeframe, signal.entry_zone, now_ms,
+    );
+
+    match OrderManager::submit_signal(interface, symbol, signal, &client_ord_id) {
+        Ok(submission) => {
+            *submitted_counter += 1;
+            info!(
+                "    ➤ SUBMITTED ordId={} clOrdId={}",
+                submission.entry_ord_id, submission.client_ord_id,
+            );
+        }
+        Err(e) => {
+            error!("    ✗ SUBMISSION FAILED: {}", e);
+        }
+    }
 }

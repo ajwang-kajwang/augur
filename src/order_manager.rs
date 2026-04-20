@@ -2,6 +2,7 @@ use crate::okx_interface::OkxInterface;
 
 pub struct OrderManager;
 
+#![allow(dead_code)]
 impl OrderManager {
     pub fn market_buy(interface: &OkxInterface, symbol: &str, size: &str) {
         println!(">>> EXECUTING BUY ORDER: {} Contracts of {} <<<", size, symbol);

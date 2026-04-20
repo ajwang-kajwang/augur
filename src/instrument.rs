@@ -221,4 +221,7 @@ impl Instrument {
     pub fn candle_status(&self) -> String {
         self.candles.status_summary()
     }
+
+    
 }
+
