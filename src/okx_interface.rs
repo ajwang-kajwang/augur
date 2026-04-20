@@ -56,16 +56,16 @@ impl OkxInterface {
         Ok(headers)
     }
 
-    pub fn get_ticker(&self, inst_id: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    pub async fn get_ticker(&self, inst_id: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let path = format!("/api/v5/market/ticker?instId={}", inst_id);
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.client.get(&url).send()?.json()?;
+        let resp = self.client.get(&url).send().await?.json().await?;
         Ok(resp)
     }
 
     /// Place a market order with a simple side+size payload.
     /// Preserved for v0.1 compatibility and quick manual testing.
-    pub fn place_order(&self, inst_id: &str, side: &str, sz: &str)
+    pub async fn place_order(&self, inst_id: &str, side: &str, sz: &str)
         -> Result<serde_json::Value, Box<dyn Error>>
     {
         let payload = serde_json::json!({
@@ -75,14 +75,14 @@ impl OkxInterface {
             "ordType": "market",
             "sz": sz,
         });
-        self.place_order_payload(&payload)
+        self.place_order_payload(&payload).await
     }
 
     /// Place an order with an arbitrary payload. Used by the order manager
     /// to construct limit orders with attached algo orders (OCO exit pairs).
     ///
     /// The payload must match OKX's /api/v5/trade/order schema.
-    pub fn place_order_payload(&self, payload: &serde_json::Value)
+    pub async fn place_order_payload(&self, payload: &serde_json::Value)
         -> Result<serde_json::Value, Box<dyn Error>>
     {
         let path = "/api/v5/trade/order";
@@ -93,7 +93,7 @@ impl OkxInterface {
         let resp = self.client.post(&url)
             .headers(headers)
             .body(body_str)
-            .send()?
+            .send()
             .await?;
         let json: serde_json::Value = resp.json().await?;
         Ok(json)
@@ -102,7 +102,7 @@ impl OkxInterface {
     /// Cancel an active order by instrument and order ID.
     /// Returned by the order manager when entry limits need to be pulled
     /// (e.g. the pattern has invalidated before fill).
-    pub fn cancel_order(&self, inst_id: &str, ord_id: &str)
+    pub async fn cancel_order(&self, inst_id: &str, ord_id: &str)
         -> Result<serde_json::Value, Box<dyn Error>>
     {
         let path = "/api/v5/trade/cancel-order";
@@ -117,7 +117,7 @@ impl OkxInterface {
         let resp = self.client.post(&url)
             .headers(headers)
             .body(body_str)
-            .send()?
+            .send()
             .await?;
         let json: serde_json::Value = resp.json().await?;
         Ok(json)

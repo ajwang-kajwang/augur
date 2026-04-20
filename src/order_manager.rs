@@ -112,10 +112,10 @@ impl Error for SubmissionError {}
 pub struct OrderManager;
 
 impl OrderManager {
-    /// Preserved from v0.1 — simple market buy for manual testing.
-    pub fn market_buy(interface: &OkxInterface, symbol: &str, size: &str) {
+    /// Simple market buy for manual testing.
+    pub async fn market_buy(interface: &OkxInterface, symbol: &str, size: &str) {
         info!(">>> MARKET BUY {} contracts of {}", size, symbol);
-        match interface.place_order(symbol, "buy", size) {
+        match interface.place_order(symbol, "buy", size).await {
             Ok(resp) => {
                 if resp["code"] == "0" {
                     let ord_id = resp["data"][0]["ordId"].as_str().unwrap_or("Unknown");
@@ -149,7 +149,8 @@ impl OrderManager {
         );
 
         let resp = interface.place_order_payload(&payload)
-            .map_err(|e| SubmissionError::Transport(e.to_string())).await?;
+        .await
+        .map_err(|e| SubmissionError::Transport(e.to_string()))?;
 
         // OKX wraps both success and failure in { "code": "...", "msg": "...", "data": [...] }.
         // Top-level code "0" means the request was accepted; per-order codes
@@ -158,10 +159,10 @@ impl OrderManager {
         let top_msg  = resp["msg"].as_str().unwrap_or("");
 
         if top_code != "0" {
-            return Err(SubmissionError::Rejected {
+            return Err(Box::new(SubmissionError::Rejected {
                 code: top_code.to_string(),
                 msg: top_msg.to_string(),
-            });
+            }) as Box<dyn std::error::Error>);
         }
 
         // Some OKX responses put success inside data[0].sCode — check that too.
@@ -172,10 +173,10 @@ impl OrderManager {
         let per_order_code = first["sCode"].as_str().unwrap_or("0");
         if per_order_code != "0" {
             let per_msg = first["sMsg"].as_str().unwrap_or("").to_string();
-            return Err(SubmissionError::Rejected {
+            return Err(Box::new(SubmissionError::Rejected {
                 code: per_order_code.to_string(),
                 msg: per_msg,
-            });
+            }) as Box<dyn std::error::Error>);
         }
 
         let ord_id = first["ordId"].as_str()
@@ -192,11 +193,12 @@ impl OrderManager {
     /// Cancel a previously-placed entry limit order. Attached algo orders
     /// on an unfilled entry are cancelled automatically by OKX when the
     /// parent is cancelled.
-    pub fn cancel(interface: &OkxInterface, inst_id: &str, ord_id: &str)
+    pub async fn cancel(interface: &OkxInterface, inst_id: &str, ord_id: &str)
         -> Result<(), SubmissionError>
     {
         info!("Cancelling order {} on {}", ord_id, inst_id);
         let resp = interface.cancel_order(inst_id, ord_id)
+            .await
             .map_err(|e| SubmissionError::Transport(e.to_string()))?;
         let code = resp["code"].as_str().unwrap_or("");
         if code == "0" {

@@ -54,6 +54,9 @@ use tracing::{info, warn, error};
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 
     info!("=== AUGUR v0.6 — Risk Gate + Order Execution ===");
 
@@ -98,9 +101,31 @@ async fn main() {
         WsConfig::live(instruments)
     };
 
-    let ws = WsClient::new(ws_config);
-    let mut rx = ws.connect().await.expect("WebSocket connection failed");
+    
     info!("[5/5] WebSocket connected — entering event loop");
+
+    let mut rx = loop {
+        let instruments = vec!["BTC-USDT-SWAP".to_string()];
+        let ws_config = if config.is_paper_trading {
+            WsConfig::paper_trading(instruments)
+        } else {
+            WsConfig::live(instruments)
+        };
+        
+        let ws = WsClient::new(ws_config);
+
+        match ws.connect().await {
+            Ok(receiver) => {
+                info!("    ➤ WebSocket connected successfully. Entering event loop.");
+                break receiver;
+            }
+            Err(e) => {
+                error!("    ✗ Connection failed: {}. Retrying in 3 seconds...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    };    
+
 
     if !trading_enabled {
         warn!("⚠️  Trading gate is CLOSED — signals will be logged but NOT submitted.");
@@ -205,7 +230,7 @@ async fn main() {
                                 trading_enabled,
                                 &mut signals_submitted,
                                 trade.timestamp_ms,
-                            );
+                            ).await;
                         }
                         Err(reason) => {
                             info!("⛔ GOLDEN rejected: {}", reason);
@@ -223,7 +248,7 @@ async fn main() {
                                 trading_enabled,
                                 &mut signals_submitted,
                                 trade.timestamp_ms,
-                            );
+                            ).await;
                         }
                         Err(reason) => {
                             info!("⛔ SNIPER rejected: {}", reason);
