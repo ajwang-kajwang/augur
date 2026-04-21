@@ -61,7 +61,7 @@ use crate::config::Config;
 use crate::position::{Positions, OrderUpdate};
 
 type HmacSha256 = Hmac<Sha256>;
-
+#[allow(dead_code)]
 pub struct PrivateWsConfig {
     pub url: String,
     pub api_key: String,
@@ -121,7 +121,7 @@ async fn connect_and_run(
 
     // --- Login ---
     let login_msg = build_login_message(config)?;
-    write.send(Message::Text(login_msg)).await?;
+    write.send(Message::Text(login_msg.into())).await?;
 
     // Wait for login response (first text frame with event="login").
     let login_ok = loop {
@@ -156,7 +156,7 @@ async fn connect_and_run(
     // --- Subscribe ---
     let sub_msg = build_subscribe_message();
     debug!("[private] subscribing: {}", sub_msg);
-    write.send(Message::Text(sub_msg)).await?;
+    write.send(Message::Text(sub_msg.into())).await?;
 
     // --- Main read loop with keepalive ---
     let mut ping_interval = time::interval(Duration::from_secs(20));

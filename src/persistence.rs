@@ -78,7 +78,7 @@ use std::fs::File;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tracing::{info, warn, error};
+use tracing::{info, error};
 
 use arrow::array::{ArrayRef, Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -356,7 +356,7 @@ async fn perform_flush(
     trigger: &str,
 ) {
     let drained = buffer.drain();
-    let count = drained.len();
+    let _count = drained.len();
     let output_dir_clone = output_dir.clone();
 
     // Parquet writer is synchronous. Move the buffer into a blocking

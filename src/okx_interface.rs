@@ -20,7 +20,7 @@ pub struct OkxInterface {
     config: Config,
     base_url: String,
 }
-
+#[allow(dead_code)]
 impl OkxInterface {
     pub fn new(config: Config) -> Self {
         let mut headers = HeaderMap::new();

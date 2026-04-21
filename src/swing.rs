@@ -103,7 +103,7 @@ pub struct SwingPoint {
     pub price: f64,
     pub swing_type: SwingType,
 }
-
+#[allow(dead_code)]
 impl SwingPoint {
     pub fn is_high(&self) -> bool { matches!(self.swing_type, SwingType::High) }
     pub fn is_low(&self) -> bool { matches!(self.swing_type, SwingType::Low) }
@@ -163,7 +163,7 @@ pub struct SwingDetector {
     /// None means "check everything in the history that's confirmable."
     last_analyzed_time: Option<u64>,
 }
-
+#[allow(dead_code)]
 impl SwingDetector {
     /// Create a new detector.
     ///

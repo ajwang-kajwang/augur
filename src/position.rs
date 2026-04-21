@@ -92,7 +92,7 @@ impl fmt::Display for PositionState {
 // ============================================================================
 // TRACKED POSITION
 // ============================================================================
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TrackedPosition {
     pub client_ord_id: String,
@@ -203,7 +203,7 @@ pub struct Positions {
     /// arrive with only the exchange ID to be routed to the right entry.
     by_ord_id: HashMap<String, String>,
 }
-
+#[allow(dead_code)]
 impl Positions {
     pub fn new() -> Self {
         Positions {

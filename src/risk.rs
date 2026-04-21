@@ -148,7 +148,7 @@ pub struct TradeSignal {
     /// reward / risk ratio.
     pub rr_ratio: f64,
 }
-
+#[allow(dead_code)]
 impl TradeSignal {
     /// OKX API side: "buy" for bullish entries, "sell" for bearish entries.
     pub fn entry_side(&self) -> &'static str {

@@ -41,7 +41,7 @@ pub struct WsArg {
 // Channel: "trades"
 // Fires on every executed trade on the exchange.
 // This is your tick-by-tick feed.
-
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TradeData {
     #[serde(rename = "instId")]
@@ -65,7 +65,7 @@ pub struct TradeData {
 // Pushes the top 5 bid/ask levels every time they change.
 // This is lightweight and perfect for Phase 1. Later, "books-l2-tbt"
 // gives you the full 400-level book tick-by-tick for your FPGA pipeline.
-
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct BookData {
     #[serde(rename = "instId")]
@@ -83,7 +83,6 @@ pub struct BookData {
 // These are the "clean" types that flow through your mpsc channels.
 // The WsClient parses raw JSON into these and sends them downstream.
 // Your strategy code never touches raw JSON.
-
 #[derive(Debug, Clone)]
 pub struct TradeUpdate {
     pub inst_id: String,
@@ -92,13 +91,13 @@ pub struct TradeUpdate {
     pub side: String,
     pub timestamp_ms: u64,
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BookLevel {
     pub price: f64,
     pub size: f64,
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OrderBookUpdate {
     pub inst_id: String,

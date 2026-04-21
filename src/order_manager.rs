@@ -38,7 +38,7 @@ impl fmt::Display for SubmissionError {
 impl Error for SubmissionError {}
 
 pub struct OrderManager;
-
+#[allow(dead_code)]
 impl OrderManager {
     pub async fn market_buy(interface: &OkxInterface, symbol: &str, size: &str) {
         info!(">>> MARKET BUY {} contracts of {}", size, symbol);

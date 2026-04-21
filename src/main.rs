@@ -1,7 +1,7 @@
 // src/main.rs
 //
 // ============================================================================
-// AUGUR v0.7 — POSITION TRACKING + COMPOUNDING DISCIPLINE
+// AUGUR v0.8 — POSITION TRACKING + COMPOUNDING DISCIPLINE
 // ============================================================================
 //
 // What changed from v0.6:
@@ -49,6 +49,7 @@ mod risk;
 mod position;
 mod private_ws;
 mod reconnect;
+mod persistence;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -63,13 +64,20 @@ use order_manager::OrderManager;
 use okx_interface::OkxInterface;
 use position::Positions;
 use private_ws::PrivateWsConfig;
+use persistence::{PersistenceConfig, TickRecord};
+use tokio::sync::mpsc;
 use tracing::{info, warn, error};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    info!("=== AUGUR v0.7 — Position Tracking + Compounding Discipline ===");
+    // Ensure rustls default crypto provider is initialized for API requests
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
+    info!("=== AUGUR v0.8 — Tick Persistence + Graceful Shutdown ===");
 
     let config = Config::load().expect("Failed to load config");
     info!(
@@ -82,7 +90,27 @@ async fn main() {
     let trading_enabled = config.trading_enabled;
     let account_balance = config.account_balance;
     let is_paper = config.is_paper_trading;
+    let persistence_enabled = config.persistence_enabled;
+    let persistence_path = config.persistence_path.clone();
     let instruments = vec!["BTC-USDT-SWAP".to_string()];
+
+    // ========================================================================
+    // PERSISTENCE CHANNEL + TASK (v0.8)
+    // ========================================================================
+    // Bounded channel — if the writer ever stalls (SSD failure, disk full),
+    // ticks drop rather than memory growing unboundedly. 10k capacity gives
+    // ~20–100 seconds of headroom at typical BTC-USDT-SWAP rates.
+    let (tick_tx, persistence_handle) = if persistence_enabled {
+        let pcfg = PersistenceConfig::from_env(&persistence_path);
+        let (tx, rx) = mpsc::channel::<TickRecord>(pcfg.channel_capacity);
+        let handle = tokio::spawn(persistence::run(pcfg, rx));
+        info!("[persistence] enabled — ticks will be recorded to {}", persistence_path);
+        (Some(tx), Some(handle))
+    } else {
+        warn!("[persistence] DISABLED — no tick data will be recorded.");
+        warn!("Phase 3 backtesting requires this to be enabled.");
+        (None::<mpsc::Sender<TickRecord>>, None::<tokio::task::JoinHandle<()>>)
+    };
 
     // Clone creds for the private WS BEFORE handing config off to the
     // REST interface.
@@ -127,13 +155,16 @@ async fn main() {
     let mut signals_built: u64 = 0;
     let mut signals_submitted: u64 = 0;
     let mut sniper_gated_off: u64 = 0;
+    let mut ticks_dropped: u64 = 0;
 
     // ========================================================================
-    // OUTER RECONNECT LOOP
+    // OUTER RECONNECT LOOP + GRACEFUL SHUTDOWN (v0.8)
     // ========================================================================
-    // When the public WS drops mid-stream, `rx.recv()` returns None and
-    // the inner loop exits. We then reconnect with exponential backoff.
-    // `Instrument` and all counters survive across reconnects.
+    // `tokio::select!` races the trading loop against Ctrl+C. On SIGINT,
+    // drop the tick_tx (closing the persistence channel) and await the
+    // writer's final flush before exiting. This prevents the last buffer
+    // of ticks from being lost and avoids corrupting the Parquet file.
+    let trading_loop = async {
     loop {
         let make_config = || {
             if is_paper {
@@ -148,6 +179,27 @@ async fn main() {
             match event {
                 StreamEvent::Trade(trade) => {
                     trade_count += 1;
+
+                    // --- Record to persistence (v0.8) ---
+                    // try_send is non-blocking: if the writer is behind,
+                    // drop the tick and log. Dropping in the hot path is
+                    // preferable to stalling the event loop.
+                    if let Some(tx) = &tick_tx {
+                        let record = TickRecord {
+                            timestamp_ms: trade.timestamp_ms,
+                            price: trade.price,
+                            size: trade.size,
+                            side: trade.side.clone(),
+                            inst_id: trade.inst_id.clone(),
+                        };
+                        if let Err(e) = tx.try_send(record) {
+                            ticks_dropped += 1;
+                            if ticks_dropped % 100 == 1 {
+                                warn!("[persistence] dropped tick #{}: {}", ticks_dropped, e);
+                            }
+                        }
+                    }
+
                     let outcome = btc.update_from_trade(&trade);
 
                     // Candle close logs
@@ -261,9 +313,10 @@ async fn main() {
                     if trade_count % 1000 == 0 {
                         let pos_summary = positions.lock().await.summary();
                         info!(
-                            "[STATUS] Trades: {} | Price: ${:.2} | Signals built/submitted: {}/{} | Sniper gated: {} | Positions: {} | Candles: [{}]",
+                            "[STATUS] Trades: {} | Price: ${:.2} | Signals built/submitted: {}/{} | Sniper gated: {} | Ticks dropped: {} | Positions: {} | Candles: [{}]",
                             trade_count, btc.last_price,
                             signals_built, signals_submitted, sniper_gated_off,
+                            ticks_dropped,
                             pos_summary, btc.candle_status(),
                         );
                     }
@@ -290,6 +343,31 @@ async fn main() {
             trade_count, book_count, signals_built, signals_submitted, sniper_gated_off,
         );
     }
+    };  // end async block
+
+    // Race the trading loop against SIGINT.
+    tokio::select! {
+        _ = trading_loop => {
+            // Unreachable: the inner loop is infinite.
+            error!("Trading loop returned unexpectedly");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("🛑 SIGINT received — beginning graceful shutdown");
+        }
+    }
+
+    // Shutdown sequence.
+    info!("Dropping tick channel — persistence task will final-flush");
+    drop(tick_tx);
+    if let Some(handle) = persistence_handle {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), handle).await {
+            Ok(Ok(())) => info!("Persistence task shut down cleanly"),
+            Ok(Err(e)) => error!("Persistence task panicked: {}", e),
+            Err(_)     => error!("Persistence task did not finish within 30s"),
+        }
+    }
+    info!("Shutdown complete. Final stats: trades={} books={} signals built/submitted={}/{} ticks dropped={}",
+          trade_count, book_count, signals_built, signals_submitted, ticks_dropped);
 }
 
 /// Submit a signal (if trading is enabled) and record it in the Positions
@@ -332,4 +410,4 @@ async fn submit_and_record(
         }
         Err(e) => error!("    ✗ SUBMISSION FAILED: {}", e),
     }
-}
+}   

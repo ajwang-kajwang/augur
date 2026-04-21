@@ -51,6 +51,7 @@ use crate::ws_types::TradeUpdate;
 // We derive Copy + Clone because Timeframe is just a tag — there's no heap
 // data to worry about. Passing it around is as cheap as passing a u8.
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Timeframe {
     M1,   // 1 minute  — scalping, tick-level structure
@@ -104,7 +105,7 @@ impl fmt::Display for Timeframe {
 // We derive Clone so candles can be cheaply copied when strategies need
 // to snapshot the current state. A Candle is 72 bytes — small enough to
 // live on the stack and pass by value without worry.
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Candle {
     /// UTC-aligned start time of this candle (inclusive), in epoch ms.
@@ -124,7 +125,7 @@ pub struct Candle {
     /// Useful for volume-spread analysis and the DSP pipeline.
     pub trade_count: u64,
 }
-
+#[allow(dead_code)]
 impl Candle {
     /// Creates a new candle seeded by the first trade in its period.
     ///
@@ -259,7 +260,7 @@ pub struct CandleAggregator {
     /// Useful for logging and diagnostics.
     pub candles_produced: u64,
 }
-
+#[allow(dead_code)]
 impl CandleAggregator {
     /// Creates a new aggregator for the given timeframe.
     ///
@@ -511,7 +512,7 @@ impl fmt::Display for CandleAggregator {
 pub struct MultiTimeframeAggregator {
     aggregators: Vec<CandleAggregator>,
 }
-
+#[allow(dead_code)]
 impl MultiTimeframeAggregator {
     /// Create a multi-timeframe aggregator.
     /// Each tuple is (Timeframe, max_history_for_that_timeframe).

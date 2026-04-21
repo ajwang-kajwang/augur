@@ -55,7 +55,7 @@ pub struct Instrument {
     candles: MultiTimeframeAggregator,
     swing_detectors: Vec<(Timeframe, SwingDetector)>,
 }
-
+#[allow(dead_code)]
 impl Instrument {
     /// Default config: candles M1×500, M15×200, H1×168, H4×180;
     /// swing detectors on H1 and H4 (lookback=3, max_swings=50).
