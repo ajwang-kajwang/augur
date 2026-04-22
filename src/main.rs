@@ -1,7 +1,7 @@
 // src/main.rs
 //
 // ============================================================================
-// AUGUR v0.8 — POSITION TRACKING + COMPOUNDING DISCIPLINE
+// AUGUR v0.7 — POSITION TRACKING + COMPOUNDING DISCIPLINE
 // ============================================================================
 //
 // What changed from v0.6:
@@ -35,24 +35,17 @@
 // Locks are held for microseconds, never across .await points.
 // `Instrument` stays single-owned on the main task.
 
-mod config;
-mod okx_interface;
-mod instrument;
-mod order_manager;
-mod ws_client;
-mod ws_types;
-mod candle;
-mod swing;
-mod abc_brc;
-mod fibonacci;
-mod risk;
-mod position;
-mod private_ws;
-mod reconnect;
-mod persistence;
+// v0.10: modules moved to lib.rs so the backtest binary can share them.
+use augur::{
+    config, instrument, candle, ws_client, ws_types,
+    fibonacci, risk, order_manager, okx_interface,
+    position, private_ws, reconnect, persistence, abc_brc,
+    reconciliation, health,
+};
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::{Mutex, watch};
 use config::Config;
 use instrument::Instrument;
 use candle::Timeframe;
@@ -64,20 +57,15 @@ use order_manager::OrderManager;
 use okx_interface::OkxInterface;
 use position::Positions;
 use private_ws::PrivateWsConfig;
-use persistence::{PersistenceConfig, TickRecord};
-use tokio::sync::mpsc;
+use persistence::{PersistenceConfig, TickRecord, book_record_from_update};
+use health::HealthConfig;
 use tracing::{info, warn, error};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    // Ensure rustls default crypto provider is initialized for API requests
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-
-    info!("=== AUGUR v0.8 — Tick Persistence + Graceful Shutdown ===");
+    info!("=== AUGUR v0.12 — Reconciliation + 4-Week Hardening ===");
 
     let config = Config::load().expect("Failed to load config");
     info!(
@@ -97,19 +85,31 @@ async fn main() {
     // ========================================================================
     // PERSISTENCE CHANNEL + TASK (v0.8)
     // ========================================================================
-    // Bounded channel — if the writer ever stalls (SSD failure, disk full),
-    // ticks drop rather than memory growing unboundedly. 10k capacity gives
-    // ~20–100 seconds of headroom at typical BTC-USDT-SWAP rates.
-    let (tick_tx, persistence_handle) = if persistence_enabled {
+    // Bounded channels — if a writer ever stalls (SSD failure, disk full),
+    // records drop rather than memory growing unboundedly. Both writers
+    // share infrastructure but run as independent tasks: a book-writer
+    // stall does not affect trade recording and vice versa.
+    //
+    // v0.9 adds the book channel alongside the existing tick channel.
+    // Phase 4 DSP work on order-flow imbalance, book pressure, and
+    // Kalman-filtered mid-price all require per-tick book snapshots,
+    // which trades alone don't carry.
+    let persistence_handles = if persistence_enabled {
         let pcfg = PersistenceConfig::from_env(&persistence_path);
-        let (tx, rx) = mpsc::channel::<TickRecord>(pcfg.channel_capacity);
-        let handle = tokio::spawn(persistence::run(pcfg, rx));
-        info!("[persistence] enabled — ticks will be recorded to {}", persistence_path);
-        (Some(tx), Some(handle))
+        let handles = persistence::spawn_all(pcfg);
+        if handles.is_some() {
+            info!("[persistence] enabled — trades AND books will be recorded to {}", persistence_path);
+        }
+        handles
     } else {
-        warn!("[persistence] DISABLED — no tick data will be recorded.");
-        warn!("Phase 3 backtesting requires this to be enabled.");
-        (None::<mpsc::Sender<TickRecord>>, None::<tokio::task::JoinHandle<()>>)
+        warn!("[persistence] DISABLED — no tick or book data will be recorded.");
+        warn!("            Phase 3 backtesting requires this to be enabled.");
+        None
+    };
+    // Split the handles so each producer side can be cloned/moved independently.
+    let (tick_tx, book_tx, persistence_tasks) = match persistence_handles {
+        Some(h) => (Some(h.tick_tx), Some(h.book_tx), Some((h.tick_task, h.book_task))),
+        None => (None, None, None),
     };
 
     // Clone creds for the private WS BEFORE handing config off to the
@@ -148,6 +148,77 @@ async fn main() {
         warn!("      Set AUGUR_TRADING_ENABLED=1 in .env to enable paper execution.");
     }
 
+    // ========================================================================
+    // BACKGROUND TASKS — Phase 2F + 4-Week Hardening (v0.12)
+    // ========================================================================
+    // Two long-running background tasks share a single shutdown signal.
+    // Both terminate cleanly when SIGINT triggers the watch channel
+    // change, ensuring journalctl shows orderly task exits rather than
+    // abrupt aborts.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // --- Reconciliation task (always spawned, regardless of trading_enabled) ---
+    // Even in dry-run, periodic reconciliation is harmless — the REST
+    // call returns recent orders, and if Positions has nothing tracked
+    // for those clOrdIds (which it won't, in dry-run), they're silently
+    // skipped as foreign. The only cost is one /trade/orders-history
+    // hit every 5 minutes. We run it in dry-run so the wiring is
+    // exercised continuously and any auth/signing bugs surface early
+    // rather than at first live deployment.
+    let reconciliation_task = {
+        let interface = Arc::clone(&interface);
+        let positions = Arc::clone(&positions);
+        let mut shutdown = shutdown_rx.clone();
+        let interval_secs = std::env::var("AUGUR_RECONCILE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(reconciliation::DEFAULT_PERIODIC_INTERVAL_SECS);
+        info!(
+            "[reconcile] periodic reconciliation enabled — every {}s against {}",
+            interval_secs, "BTC-USDT-SWAP",
+        );
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            // Skip the immediate first tick so we don't reconcile before
+            // the WS connection has had a chance to come up.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let stats = reconciliation::reconcile(
+                            &interface, &positions,
+                            &["BTC-USDT-SWAP"], "SWAP",
+                        ).await;
+                        if stats.errors > 0 {
+                            warn!(
+                                "[reconcile] pass had {} errors (api_calls={}, orders_seen={})",
+                                stats.errors, stats.api_calls, stats.orders_seen,
+                            );
+                        }
+                    }
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            info!("[reconcile] task stopping on shutdown signal");
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    // --- Health monitor (spawned only when persistence is enabled) ---
+    // The monitor writes a canary file each pass to verify the SSD mount
+    // is still writable. If persistence is disabled, the mount path may
+    // not exist at all, so we skip the monitor entirely.
+    let health_task = if persistence_enabled {
+        let cfg = HealthConfig::from_env(std::path::PathBuf::from(&persistence_path));
+        let shutdown = shutdown_rx.clone();
+        Some(tokio::spawn(health::run(cfg, shutdown)))
+    } else {
+        None
+    };
+
     info!("[6/6] Entering main event loop");
 
     let mut trade_count: u64 = 0;
@@ -156,6 +227,7 @@ async fn main() {
     let mut signals_submitted: u64 = 0;
     let mut sniper_gated_off: u64 = 0;
     let mut ticks_dropped: u64 = 0;
+    let mut books_dropped: u64 = 0;
 
     // ========================================================================
     // OUTER RECONNECT LOOP + GRACEFUL SHUTDOWN (v0.8)
@@ -313,10 +385,10 @@ async fn main() {
                     if trade_count % 1000 == 0 {
                         let pos_summary = positions.lock().await.summary();
                         info!(
-                            "[STATUS] Trades: {} | Price: ${:.2} | Signals built/submitted: {}/{} | Sniper gated: {} | Ticks dropped: {} | Positions: {} | Candles: [{}]",
+                            "[STATUS] Trades: {} | Price: ${:.2} | Signals built/submitted: {}/{} | Sniper gated: {} | Ticks/books dropped: {}/{} | Positions: {} | Candles: [{}]",
                             trade_count, btc.last_price,
                             signals_built, signals_submitted, sniper_gated_off,
-                            ticks_dropped,
+                            ticks_dropped, books_dropped,
                             pos_summary, btc.candle_status(),
                         );
                     }
@@ -324,6 +396,22 @@ async fn main() {
 
                 StreamEvent::Book(book) => {
                     book_count += 1;
+
+                    // --- Record book snapshot to persistence (v0.9) ---
+                    // Same try_send pattern as ticks — non-blocking drop
+                    // if the book writer ever falls behind. Book updates
+                    // arrive far more frequently than trades on liquid
+                    // pairs (every microstructure change, not just fills).
+                    if let Some(tx) = &book_tx {
+                        let record = book_record_from_update(&book);
+                        if tx.try_send(record).is_err() {
+                            books_dropped += 1;
+                            if books_dropped % 500 == 1 {
+                                warn!("[persistence] dropped book snapshot #{}", books_dropped);
+                            }
+                        }
+                    }
+
                     btc.update_from_book(&book);
                     if book_count % 500 == 0 {
                         info!(
@@ -342,6 +430,27 @@ async fn main() {
             "[public] stream ended — reconnecting. Stats: trades={} books={} signals={}/{} gated={}",
             trade_count, book_count, signals_built, signals_submitted, sniper_gated_off,
         );
+
+        // v0.12 Phase 2F: fire a reconciliation pass on disconnect.
+        // The most likely cause of any local/exchange state drift is
+        // the disconnect window we just experienced — events fired on
+        // OKX during the gap won't be replayed by the WS. We reconcile
+        // BEFORE the outer loop reconnects so by the time the next
+        // tick arrives, Positions matches exchange truth.
+        //
+        // This runs even in dry-run; it's idempotent and exercises the
+        // wiring continuously, surfacing any auth/signing bugs early.
+        info!("[reconcile] post-disconnect pass");
+        let post_stats = reconciliation::reconcile(
+            &interface, &positions,
+            &["BTC-USDT-SWAP"], "SWAP",
+        ).await;
+        if post_stats.state_changes > 0 {
+            warn!(
+                "[reconcile] post-disconnect: {} state changes — exchange events were missed during the gap",
+                post_stats.state_changes,
+            );
+        }
     }
     };  // end async block
 
@@ -357,17 +466,46 @@ async fn main() {
     }
 
     // Shutdown sequence.
-    info!("Dropping tick channel — persistence task will final-flush");
+    info!("Signaling background tasks to stop");
+    let _ = shutdown_tx.send(true);
+
+    info!("Dropping persistence channels — writers will final-flush");
     drop(tick_tx);
-    if let Some(handle) = persistence_handle {
-        match tokio::time::timeout(std::time::Duration::from_secs(30), handle).await {
-            Ok(Ok(())) => info!("Persistence task shut down cleanly"),
-            Ok(Err(e)) => error!("Persistence task panicked: {}", e),
-            Err(_)     => error!("Persistence task did not finish within 30s"),
+    drop(book_tx);
+
+    // Await persistence writers (must finish flushing buffered ticks/books).
+    if let Some((tick_task, book_task)) = persistence_tasks {
+        let deadline = std::time::Duration::from_secs(30);
+        match tokio::time::timeout(deadline, async {
+            let (t, b) = tokio::join!(tick_task, book_task);
+            (t, b)
+        }).await {
+            Ok((Ok(()), Ok(()))) => info!("Both persistence tasks shut down cleanly"),
+            Ok((t, b)) => {
+                if let Err(e) = t { error!("Tick writer panicked: {}", e); }
+                if let Err(e) = b { error!("Book writer panicked: {}", e); }
+            }
+            Err(_) => error!("Persistence tasks did not finish within 30s — some records may be lost"),
         }
     }
-    info!("Shutdown complete. Final stats: trades={} books={} signals built/submitted={}/{} ticks dropped={}",
-          trade_count, book_count, signals_built, signals_submitted, ticks_dropped);
+
+    // Await background monitor tasks. These have lighter shutdown work
+    // (no buffered state to flush) so a 5s timeout is generous.
+    let monitor_deadline = std::time::Duration::from_secs(5);
+    if let Err(_) = tokio::time::timeout(monitor_deadline, reconciliation_task).await {
+        warn!("Reconciliation task did not finish within 5s");
+    }
+    if let Some(task) = health_task {
+        if let Err(_) = tokio::time::timeout(monitor_deadline, task).await {
+            warn!("Health monitor did not finish within 5s");
+        }
+    }
+
+    info!(
+        "Shutdown complete. Final stats: trades={} books={} signals built/submitted={}/{} ticks/books dropped={}/{}",
+        trade_count, book_count, signals_built, signals_submitted,
+        ticks_dropped, books_dropped,
+    );
 }
 
 /// Submit a signal (if trading is enabled) and record it in the Positions
@@ -410,4 +548,4 @@ async fn submit_and_record(
         }
         Err(e) => error!("    ✗ SUBMISSION FAILED: {}", e),
     }
-}   
+}
