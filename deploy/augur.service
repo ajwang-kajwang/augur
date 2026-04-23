@@ -1,16 +1,15 @@
 [Unit]
 Description=Augur algorithmic trading bot (OKX BTC-USDT-SWAP)
-Documentation=https://github.com/your-username/augur
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=augur
-Group=augur
-WorkingDirectory=/opt/augur
-ExecStart=/opt/augur/augur
-EnvironmentFile=/opt/augur/.env
+User=arlene
+Group=arlene
+WorkingDirectory=/home/arlene/Development/augur
+ExecStart=/home/arlene/Development/augur/target/debug/augur
+EnvironmentFile=/home/arlene/Development/augur/.env
 
 # Restart on failure — but rate-limit to avoid runaway loops if
 # OKX returns a persistent auth error.
@@ -29,8 +28,8 @@ SyslogIdentifier=augur
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/opt/augur
+ProtectHome=no
+ReadWritePaths=/home/arlene/Development/augur
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

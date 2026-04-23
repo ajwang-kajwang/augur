@@ -63,10 +63,12 @@ use tracing::{info, warn, error};
 
 #[tokio::main]
 async fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    
     tracing_subscriber::fmt::init();
 
     info!("=== AUGUR v0.12 — Reconciliation + 4-Week Hardening ===");
-
+    
     let config = Config::load().expect("Failed to load config");
     info!(
         "[1/6] Config loaded. Paper trading: {} | Trading enabled: {} | Balance: ${:.2}",

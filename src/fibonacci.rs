@@ -55,7 +55,6 @@ impl fmt::Display for FibLevel {
             self.label, self.fraction * 100.0, self.price)
     }
 }
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FibSequence {
     pub anchor_a: f64,
@@ -64,7 +63,7 @@ pub struct FibSequence {
     pub retracements: Vec<FibLevel>,
     pub targets: Vec<FibLevel>,
 }
-#[allow(dead_code)]
+
 impl FibSequence {
     pub fn from_leg(a_price: f64, b_price: f64, direction: PatternDirection) -> Self {
         let range = (b_price - a_price).abs();

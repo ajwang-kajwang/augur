@@ -1337,7 +1337,7 @@ impl BacktestEngine {
 // ============================================================================
 // TESTS
 // ============================================================================
-
+#[allow(dead_code)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1557,12 +1557,11 @@ mod tests {
         // total pnl = 15, ending equity = 10015
         assert!((m.total_pnl - 15.0).abs() < 1e-9);
     }
-
     #[test]
     fn max_drawdown_tracks_peak_to_trough() {
         let mut pf = BacktestPortfolio::new(10_000.0);
         // Up, then down, then recover partially.
-        for (entry, exit_win) in [
+        for (_entry, exit_win) in [
             (100.0, 120.0),  // +20
             (100.0, 120.0),  // +20 (peak at 10040)
             (100.0, 95.0),   // -5
@@ -1603,13 +1602,12 @@ mod tests {
             ask_prices: ap, ask_sizes: asz,
         }
     }
-
     #[test]
     fn walk_ladder_limit_respects_price() {
         // Asks: 100.5, 101.0, 101.5, 102.0, 102.5 (each 1.0 BTC = 100 contracts).
         // Buy limit at 101.0 should take the first 2 levels (100.5 + 101.0)
         // = 200 contracts, avg price = (100.5 + 101.0) / 2 = 100.75.
-        let bk = mk_book(101.0, 1.0, 1.0);  // mid=101, spread=1 → asks start at 101.5
+        let _bk = mk_book(101.0, 1.0, 1.0);  // mid=101, spread=1 → asks start at 101.5
         // Actually re-read: spread=1, mid=101 → asks at 101.5, 102.0, 102.5, 103.0, 103.5
         // We want a book where levels straddle 101 cleanly. Use different params.
         let bk = BookSnapshot {

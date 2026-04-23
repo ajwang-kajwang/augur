@@ -26,7 +26,6 @@ use crate::swing::{SwingDetector, SwingPoint, SwingType};
 // ============================================================================
 // PATTERN DIRECTION
 // ============================================================================
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternDirection {
     Bullish,
@@ -56,7 +55,7 @@ pub struct AbcdPattern {
     pub b: SwingPoint,
     pub c: SwingPoint,
 }
-#[allow(dead_code)]
+
 impl AbcdPattern {
     pub fn ab_range(&self) -> f64 { (self.b.price - self.a.price).abs() }
     pub fn bc_range(&self) -> f64 { (self.c.price - self.b.price).abs() }
@@ -111,7 +110,6 @@ pub fn detect_abcd(detector: &SwingDetector) -> Option<AbcdPattern> {
 // ============================================================================
 // BRC PATTERN
 // ============================================================================
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BrcPattern {
     pub direction: PatternDirection,
@@ -120,7 +118,6 @@ pub struct BrcPattern {
     pub break_point: SwingPoint,
     pub retest: SwingPoint,
 }
-#[allow(dead_code)]
 impl BrcPattern {
     pub fn break_depth(&self) -> f64 {
         (self.break_point.price - self.level.price).abs()

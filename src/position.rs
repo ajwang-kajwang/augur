@@ -371,6 +371,20 @@ impl Positions {
             counts[0], counts[1], counts[2], counts[3],
         )
     }
+
+    // ========================================================================
+    // RECONCILIATION HELPERS
+    // ========================================================================
+
+    /// Check if a given client_ord_id is tracked by this registry.
+    pub fn has_client_id(&self, client_ord_id: &str) -> bool {
+        self.by_client_id.contains_key(client_ord_id)
+    }
+
+    /// Get the current state of a tracked position, if it exists.
+    pub fn state_for_client_id(&self, client_ord_id: &str) -> Option<PositionState> {
+        self.by_client_id.get(client_ord_id).map(|p| p.state)
+    }
 }
 
 impl Default for Positions {
