@@ -454,7 +454,7 @@ async fn main() {
             );
         }
     }
-    };  // end async block
+    };  
 
     // Race the trading loop against SIGINT.
     tokio::select! {
